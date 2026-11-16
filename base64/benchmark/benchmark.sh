@@ -46,8 +46,8 @@ Options:
   -h, --help           Show this help
 
 SIZE accepts a plain byte count or a K/KiB/M/MiB suffix. The input must be
-ASCII text. The Zig CLI reads at most 1 MiB, so the generated input is capped
-at 768K, the largest source size whose encoded form also fits in 1 MiB.
+valid UTF-8 text. The Zig CLI reads at most 1 MiB, so the generated input is
+capped at 768K, the largest source size whose encoded form also fits in 1 MiB.
 EOF
 }
 
@@ -140,7 +140,6 @@ need cmp
 need head
 need mktemp
 need sort
-need tr
 need wc
 need cat
 if (( ! NO_BUILD )); then
@@ -193,10 +192,10 @@ ENCODED_SIZE=$(( (INPUT_SIZE + 2) / 3 * 4 ))
 (( ENCODED_SIZE <= 1024 * 1024 )) \
     || die "input is too large: its ${ENCODED_SIZE}-byte encoding exceeds the Zig CLI's 1 MiB reader limit"
 
-NON_ASCII=$(LC_ALL=C tr -d '\000-\177' < "$INPUT" | wc -c)
-NON_ASCII=${NON_ASCII//[[:space:]]/}
-(( NON_ASCII == 0 )) \
-    || die "input must be ASCII text: found ${NON_ASCII} non-ASCII byte(s); the Rust decoder treats decoded bytes as Latin-1 code points"
+if command -v iconv >/dev/null 2>&1; then
+    iconv -f UTF-8 -t UTF-8 "$INPUT" >/dev/null 2>&1 \
+        || die "input must be valid UTF-8 text: the Rust CLI reads files as UTF-8"
+fi
 
 if (( ! NO_BUILD )); then
     printf '==> Building Rust CLI (release)\n'
@@ -233,6 +232,7 @@ VECTORS=(
     "fo" "Zm8="
     "foo" "Zm9v"
     "Hello, World!" "SGVsbG8sIFdvcmxkIQ=="
+    "Hello, 世界! Zig 🦎" "SGVsbG8sIOS4lueVjCEgWmlnIPCfpo4="
 )
 for ((i = 0; i < ${#VECTORS[@]}; i += 2)); do
     plain=${VECTORS[i]}

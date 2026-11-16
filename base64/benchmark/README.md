@@ -9,7 +9,8 @@ agree, and then measures end-to-end `encode` and `decode` performance.
 - Bash 5.0+ (uses `EPOCHREALTIME` for microsecond timings)
 - `cargo` and `rustc`
 - Zig 0.17+
-- Standard Unix tools: `awk`, `cmp`, `head`, `mktemp`, `sort`, `tr`, `wc`
+- Standard Unix tools: `awk`, `cmp`, `head`, `mktemp`, `sort`, `wc`
+- Optional: `iconv`, used to validate `--input` files as UTF-8
 
 ## Usage
 
@@ -23,7 +24,7 @@ agree, and then measures end-to-end `encode` and `decode` performance.
 # More samples with a 256 KiB input
 ./benchmark.sh --iterations 100 --warmup 10 --size 256K
 
-# Benchmark an existing file (must be ASCII text)
+# Benchmark an existing file (must be UTF-8 text)
 ./benchmark.sh --input /path/to/file.txt
 
 # Only run the correctness checks
@@ -55,8 +56,8 @@ agree, and then measures end-to-end `encode` and `decode` performance.
    and truncating it to the requested size, unless `--input` is given.
 2. Builds the Rust CLI with `cargo build --release` and the Zig CLI with
    `zig build -Doptimize=ReleaseFast`.
-3. Verifies known Base64 vectors (empty string, all three padding cases, and a
-   longer string) against both CLIs.
+3. Verifies known Base64 vectors (empty string, all padding cases, ASCII and
+   non-ASCII strings) against both CLIs.
 4. Encodes the input with both CLIs, checks that the encodings are byte-for-byte
    identical, and decodes each encoding with both CLIs to check every
    cross-combination round-trips.
@@ -71,10 +72,10 @@ encode/decode functions.
 
 ## Notes and limitations
 
-- **Input is ASCII-only.** The Rust decoder pushes decoded bytes as `char`,
-  which treats each byte as a Latin-1 code point, so non-ASCII round-trips do
-  not produce the original UTF-8 bytes. The script rejects non-ASCII input
-  instead of reporting a misleading benchmark failure.
+- **Input is UTF-8 text.** The Rust CLI reads files with `read_to_string`, and
+  its decoder returns a `String`, so both the input and decoded data must be
+  valid UTF-8. Binary input is not supported by the Rust CLI; the script
+  validates `--input` with `iconv` when available.
 - **768K input cap.** [`../zig/src/main.zig`](../zig/src/main.zig) reads files
   with a 1 MiB limit. A 768 KiB source encodes to exactly 1 MiB, which is the
   largest input both CLIs accept for decode. Raise that limit if you need larger
@@ -91,10 +92,10 @@ encode/decode functions.
 
 ```text
 Backend  Operation   Mean(ms)    Min(ms)   Median(ms)    Max(ms)        MiB/s
-Rust     encode         3.580      3.313        3.557      4.190        139.7
-Zig      encode         1.459      1.247        1.407      1.761        342.7
-Rust     decode         2.872      2.625        2.815      3.474        174.1
-Zig      decode         2.371      2.192        2.342      2.799        210.9
+Rust     encode         1.470      1.302        1.407      1.845        340.2
+Zig      encode         1.431      1.221        1.360      2.212        349.4
+Rust     decode         2.031      1.852        1.998      2.293        246.2
+Zig      decode         2.316      2.098        2.295      2.694        215.9
 ```
 
 Numbers are machine-specific; run the script to measure the current binaries.

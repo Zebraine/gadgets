@@ -5,3 +5,8 @@ const Io = std.Io;
 
 pub const encode = base64.encode;
 pub const decode = base64.decode;
+
+test {
+    // Include the library's test blocks in `zig build test`.
+    _ = base64;
+}

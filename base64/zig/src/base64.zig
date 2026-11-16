@@ -141,7 +141,7 @@ test "base64 encode and decode" {
 }
 
 test "base64 decode ignores whitespace" {
-    const decoded = try decode(std.testing.allocator, "SGVs\nbG8s\r\nIFdv ckxk IQ==\n");
+    const decoded = try decode(std.testing.allocator, "SGVs\nbG8s\r\nIFdvcmxk IQ==\n");
     defer std.testing.allocator.free(decoded);
 
     try std.testing.expectEqualStrings("Hello, World!", decoded);
