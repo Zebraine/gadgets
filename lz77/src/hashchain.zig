@@ -20,7 +20,7 @@ fn hash_seg(b: []const Token) !usize {
     // only accept literal tokens for hashing
     for (b[0..MIN_MATCH_LENGTH]) |token| {
         if (!token.is_literal()) return error.InvalidTokenForHashing;
-        hash = (hash *% 2654435761) + @as(usize, token.literal);
+        hash = (hash *% 2654435761) +% @as(usize, token.literal);
     }
 
     return hash % HASH_SIZE;
