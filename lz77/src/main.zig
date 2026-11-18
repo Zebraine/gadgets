@@ -17,9 +17,9 @@ pub fn main(init: std.process.Init) !void {
     const stdout = &writer.interface;
 
     const tokens = try lz77.token_stream.tokenize(allocator, line);
-    const encoded = try lz77.hashchain.encode(allocator, tokens);
+    const compressed = try lz77.hashchain.compress(allocator, tokens);
 
-    for (encoded) |token| {
+    for (compressed) |token| {
         switch (token) {
             .literal => |literal| {
                 try stdout.print("Literal: {}\n", .{literal});
@@ -29,6 +29,28 @@ pub fn main(init: std.process.Init) !void {
             },
         }
     }
+
+    const encoded = try lz77.token_stream.encode(allocator, compressed, lz77.MIN_MATCH_LENGTH);
+
+    for (encoded) |c| {
+        try stdout.print("{x}\n", .{c});
+    }
+
+    const decoded = try lz77.token_stream.decode(allocator, encoded, lz77.MIN_MATCH_LENGTH);
+
+    for (decoded) |token| {
+        switch (token) {
+            .literal => |literal| {
+                try stdout.print("Decoded Literal: {}\n", .{literal});
+            },
+            .match => |match| {
+                try stdout.print("Decoded Match: distance={}, length={}\n", .{ match.distance, match.length });
+            },
+        }
+    }
+
+    const detokenized = try lz77.token_stream.detokenize(allocator, decoded);
+    try stdout.print("Detokenized: {s}\n", .{detokenized});
 
     try stdout.flush();
 }

@@ -7,8 +7,9 @@ const Match = token_stream.Match;
 const HASH_SIZE = 32768;
 const WINDOW_SIZE = 32768;
 
-const MIN_MATCH_LENGTH: u16 = 3;
-const MAX_MATCH_LENGTH: u16 = 258;
+const lz77 = @import("root.zig");
+const MIN_MATCH_LENGTH: u16 = lz77.MIN_MATCH_LENGTH;
+const MAX_MATCH_LENGTH: u16 = lz77.MAX_MATCH_LENGTH;
 
 var head: [HASH_SIZE]usize = @splat(0xffffffff);
 var prev: [WINDOW_SIZE]usize = @splat(0xffffffff);
@@ -60,7 +61,7 @@ fn find_longest_match(pos: usize, input: []const Token) !Match {
     return Match{ .distance = best_distance, .length = best_length };
 }
 
-pub fn encode(allocator: std.mem.Allocator, input: []const Token) ![]Token {
+pub fn compress(allocator: std.mem.Allocator, input: []const Token) ![]Token {
     var output: std.ArrayList(Token) = .empty;
     const input_len = input.len;
 
