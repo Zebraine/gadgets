@@ -1,0 +1,12 @@
+.{
+    .name = .lz77,
+    .version = "0.0.0",
+    .fingerprint = 0x21687f1a86710f85,
+    .minimum_zig_version = "0.17.1",
+    .dependencies = .{},
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}
