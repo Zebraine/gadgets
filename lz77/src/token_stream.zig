@@ -1,125 +1,135 @@
+//! LZ77 tokens and their conversion to and from the bit-packed token stream.
+
 const std = @import("std");
 const bit_stream = @import("bit_stream.zig");
-const BitWriter = bit_stream.BitWriter;
 const BitReader = bit_stream.BitReader;
+const BitWriter = bit_stream.BitWriter;
 
-pub const Token = union(enum) {
-    literal: u8,
-    match: Match,
+/// The shortest match the encoder emits; shorter runs stay literals.
+pub const MIN_MATCH_LENGTH: u16 = 3;
 
-    pub fn is_literal(self: Token) bool {
-        return switch (self) {
-            .literal => true,
-            .match => false,
-        };
-    }
+/// The longest match representable by the encoded 8-bit length field.
+pub const MAX_MATCH_LENGTH: u16 = 258;
 
-    pub fn is_match(self: Token) bool {
-        return switch (self) {
-            .literal => false,
-            .match => true,
-        };
-    }
-
-    pub fn equal(self: Token, other: Token) bool {
-        return switch (self) {
-            .literal => |literal| switch (other) {
-                .literal => |other_literal| literal == other_literal,
-                .match => false,
-            },
-            .match => |match| switch (other) {
-                .literal => false,
-                .match => |other_match| match.distance == other_match.distance and match.length == other_match.length,
-            },
-        };
-    }
-
-    pub fn into_bits(self: Token, writer: *BitWriter, length_offset: u16) !void {
-        switch (self) {
-            .literal => |literal| {
-                try writer.write_bit(0);
-                try writer.write_bits(@as(u64, literal), 8);
-            },
-            .match => |match| {
-                try writer.write_bit(1);
-                try writer.write_bits(@as(u64, match.distance), 16);
-                try writer.write_bits(@as(u64, match.length - length_offset), 8);
-            },
-        }
-    }
-
-    pub fn from_bits(reader: *BitReader, length_offset: u16) !Token {
-        const match_bit = try reader.read_bit();
-        if (match_bit == 1) {
-            const distance = @as(u16, @intCast(try reader.read_bits(16)));
-            const length = @as(u16, @intCast(try reader.read_bits(8))) + length_offset;
-            return Token{ .match = Match{ .distance = distance, .length = length } };
-        } else {
-            const literal = @as(u8, @intCast(try reader.read_bits(8)));
-            return Token{ .literal = literal };
-        }
-    }
-};
-
+/// A back-reference to earlier tokens.
 pub const Match = struct {
+    /// Distance from the current position back to the start of the match.
     distance: u16,
+    /// Number of tokens covered by the match.
     length: u16,
 };
 
-pub fn tokenize(allocator: std.mem.Allocator, input: []const u8) ![]Token {
-    var tokens: []Token = try allocator.alloc(Token, input.len);
-    var i: usize = 0;
+/// A single LZ77 symbol: either a literal byte or a back-reference.
+pub const Token = union(enum) {
+    const LITERAL_TAG: u1 = 0;
+    const MATCH_TAG: u1 = 1;
+    const LITERAL_BITS = 8;
+    const DISTANCE_BITS = 16;
+    const LENGTH_BITS = 8;
 
-    while (i < input.len) : (i += 1) {
-        const token = Token{ .literal = input[i] };
-        tokens[i] = token;
-    }
+    literal: u8,
+    match: Match,
 
-    return tokens;
-}
-
-pub fn detokenize(allocator: std.mem.Allocator, tokens: []Token) ![]u8 {
-    var output: std.ArrayList(u8) = .empty;
-
-    for (tokens) |token| {
-        switch (token) {
+    /// Appends this token to `writer`:
+    ///
+    ///     literal: [0][8-bit byte]
+    ///     match:   [1][16-bit distance][8-bit length - length_offset]
+    pub fn intoBits(self: Token, writer: *BitWriter, length_offset: u16) !void {
+        switch (self) {
             .literal => |literal| {
-                try output.append(allocator, literal);
+                try writer.writeBit(LITERAL_TAG);
+                try writer.writeBits(literal, LITERAL_BITS);
             },
             .match => |match| {
-                var pos = output.items.len - @as(usize, match.distance);
-                var length = @as(usize, match.length);
-                while (length > 0) : (length -= 1) {
-                    const byte = output.items[pos];
-                    try output.append(allocator, byte);
-                    pos += 1;
-                }
+                try writer.writeBit(MATCH_TAG);
+                try writer.writeBits(match.distance, DISTANCE_BITS);
+                try writer.writeBits(match.length - length_offset, LENGTH_BITS);
             },
         }
     }
 
-    return output.toOwnedSlice(allocator);
-}
+    /// Reads a token written by `intoBits`.
+    pub fn fromBits(reader: *BitReader, length_offset: u16) !Token {
+        return switch (try reader.readBit()) {
+            LITERAL_TAG => .{ .literal = @intCast(try reader.readBits(LITERAL_BITS)) },
+            MATCH_TAG => .{ .match = .{
+                .distance = @intCast(try reader.readBits(DISTANCE_BITS)),
+                .length = @as(u16, @intCast(try reader.readBits(LENGTH_BITS))) + length_offset,
+            } },
+        };
+    }
+};
 
-pub fn encode(allocator: std.mem.Allocator, tokens: []Token, length_offset: u16) ![]u8 {
-    var bit_writer = BitWriter.init(allocator);
+/// Converts between input bytes and the token representation.
+pub const TokenStream = struct {
+    allocator: std.mem.Allocator,
 
-    for (tokens) |token| {
-        try token.into_bits(&bit_writer, length_offset);
+    pub fn init(allocator: std.mem.Allocator) TokenStream {
+        return .{ .allocator = allocator };
     }
 
-    return bit_writer.items.toOwnedSlice(allocator);
-}
+    /// Splits `input` into one literal token per byte.
+    pub fn tokenize(self: TokenStream, input: []const u8) ![]Token {
+        const tokens = try self.allocator.alloc(Token, input.len);
 
-pub fn decode(allocator: std.mem.Allocator, input: []const u8, length_offset: u16) ![]Token {
-    var bit_reader = BitReader.init(input);
+        for (input, 0..) |byte, i| {
+            tokens[i] = .{ .literal = byte };
+        }
 
-    var tokens: std.ArrayList(Token) = .empty;
-
-    while (true) {
-        const token = Token.from_bits(&bit_reader, length_offset) catch break;
-        try tokens.append(allocator, token);
+        return tokens;
     }
 
-    return tokens.toOwnedSlice(allocator);
-}
+    /// Rebuilds the original bytes from `tokens`.
+    ///
+    /// A match may overlap the bytes it produces, so the copy advances byte by
+    /// byte instead of copying a slice in one step.
+    pub fn detokenize(self: TokenStream, tokens: []const Token) ![]u8 {
+        var output: std.ArrayList(u8) = .empty;
+
+        for (tokens) |token| {
+            switch (token) {
+                .literal => |literal| {
+                    try output.append(self.allocator, literal);
+                },
+                .match => |match| {
+                    var pos = output.items.len - @as(usize, match.distance);
+                    var remaining = @as(usize, match.length);
+                    while (remaining > 0) : (remaining -= 1) {
+                        const byte = output.items[pos];
+                        try output.append(self.allocator, byte);
+                        pos += 1;
+                    }
+                },
+            }
+        }
+
+        return output.toOwnedSlice(self.allocator);
+    }
+
+    /// Packs `tokens` into bytes using the format documented on `Token.intoBits`.
+    pub fn encode(self: TokenStream, tokens: []const Token, length_offset: u16) ![]u8 {
+        var bit_writer = BitWriter.init(self.allocator);
+
+        for (tokens) |token| {
+            try token.intoBits(&bit_writer, length_offset);
+        }
+
+        return bit_writer.bytes.toOwnedSlice(self.allocator);
+    }
+
+    /// Decodes a byte stream written by `encode`, stopping at the end of the input.
+    pub fn decode(self: TokenStream, input: []const u8, length_offset: u16) ![]Token {
+        var bit_reader = BitReader.init(input);
+        var tokens: std.ArrayList(Token) = .empty;
+
+        while (true) {
+            const token = Token.fromBits(&bit_reader, length_offset) catch |err| switch (err) {
+                error.EndOfStream => break,
+                else => return err,
+            };
+            try tokens.append(self.allocator, token);
+        }
+
+        return tokens.toOwnedSlice(self.allocator);
+    }
+};

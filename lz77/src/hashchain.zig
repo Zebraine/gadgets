@@ -1,90 +1,117 @@
+//! LZ77 matching over a token stream, using a hash chain of earlier positions.
+
 const std = @import("std");
 
 const token_stream = @import("token_stream.zig");
 const Token = token_stream.Token;
 const Match = token_stream.Match;
 
-const HASH_SIZE = 32768;
-const WINDOW_SIZE = 32768;
+/// Finds repeated token sequences with a hash chain.
+pub const HashChain = struct {
+    const MIN_MATCH_LENGTH = token_stream.MIN_MATCH_LENGTH;
+    const MAX_MATCH_LENGTH = token_stream.MAX_MATCH_LENGTH;
 
-const lz77 = @import("root.zig");
-const MIN_MATCH_LENGTH: u16 = lz77.MIN_MATCH_LENGTH;
-const MAX_MATCH_LENGTH: u16 = lz77.MAX_MATCH_LENGTH;
+    const HASH_SIZE = 32768;
+    const HASH_MULTIPLIER = 2654435761;
+    const WINDOW_SIZE = 32768;
+    const WINDOW_MASK = WINDOW_SIZE - 1;
 
-var head: [HASH_SIZE]usize = @splat(0xffffffff);
-var prev: [WINDOW_SIZE]usize = @splat(0xffffffff);
+    /// Marks the end of a hash chain.
+    const NO_POSITION: usize = 0xffffffff;
 
-fn hash_seg(b: []const Token) !usize {
-    if (b.len < MIN_MATCH_LENGTH) return 0;
-    var hash: usize = 0;
+    allocator: std.mem.Allocator,
+    /// Maps a hash to the most recent position with that hash.
+    head: [HASH_SIZE]usize = @splat(NO_POSITION),
+    /// Links each position to the previous position with the same hash.
+    prev: [WINDOW_SIZE]usize = @splat(NO_POSITION),
 
-    // only accept literal tokens for hashing
-    for (b[0..MIN_MATCH_LENGTH]) |token| {
-        if (!token.is_literal()) return error.InvalidTokenForHashing;
-        hash = (hash *% 2654435761) +% @as(usize, token.literal);
+    pub fn init(allocator: std.mem.Allocator) HashChain {
+        return .{ .allocator = allocator };
     }
 
-    return hash % HASH_SIZE;
-}
+    /// Replaces runs of literals with back-references.
+    ///
+    /// `input` is expected to contain only literal tokens, as produced by
+    /// `TokenStream.tokenize`. The chain is initialized when the instance is
+    /// created and is not reset between calls, so use a fresh instance for
+    /// each input.
+    pub fn compress(self: *HashChain, input: []const Token) ![]Token {
+        var output: std.ArrayList(Token) = .empty;
+        const input_len = input.len;
+        var pos: usize = 0;
 
-fn insert_string(pos: usize, input: []const Token) !void {
-    const hash = try hash_seg(input[pos..]);
+        while (pos < input_len) : (pos += 1) {
+            if (input_len - pos < MIN_MATCH_LENGTH) {
+                try output.append(self.allocator, input[pos]);
+                continue;
+            }
 
-    prev[pos & (WINDOW_SIZE - 1)] = head[hash];
-    head[hash] = pos;
-}
+            const match = try self.findLongestMatch(pos, input);
+            if (match.length >= MIN_MATCH_LENGTH) {
+                try output.append(self.allocator, .{ .match = match });
+                pos += @as(usize, match.length) - 1;
+            } else {
+                try output.append(self.allocator, input[pos]);
+            }
 
-fn find_longest_match(pos: usize, input: []const Token) !Match {
-    var best_length: u16 = 0;
-    var best_distance: u16 = 0;
-
-    const hash = try hash_seg(input[pos..]);
-    var match_pos = head[hash];
-
-    while (match_pos != 0xffffffff) : (match_pos = prev[match_pos & (WINDOW_SIZE - 1)]) {
-        const distance = @as(u16, @intCast(pos - @as(usize, match_pos)));
-        if (distance > WINDOW_SIZE) continue;
-
-        var length: u16 = 0;
-        while (length < MAX_MATCH_LENGTH and pos + @as(usize, length) < input.len and
-            input[pos + @as(usize, length)].equal(input[@as(usize, match_pos) + @as(usize, length)]))
-        {
-            length += 1;
+            try self.insert(pos, input);
         }
 
-        if (length > best_length) {
-            best_length = length;
-            best_distance = distance;
-        }
+        return output.toOwnedSlice(self.allocator);
     }
 
-    return Match{ .distance = best_distance, .length = best_length };
-}
+    /// Hashes the first `MIN_MATCH_LENGTH` literal tokens of `tokens`.
+    ///
+    /// Returns 0 when there are not enough tokens to form a match, and
+    /// `error.InvalidTokenForHashing` when a match token is encountered.
+    fn hashTokens(tokens: []const Token) !usize {
+        if (tokens.len < MIN_MATCH_LENGTH) return 0;
 
-pub fn compress(allocator: std.mem.Allocator, input: []const Token) ![]Token {
-    var output: std.ArrayList(Token) = .empty;
-    const input_len = input.len;
-
-    var pos: usize = 0;
-
-    while (pos < input_len) : (pos += 1) {
-        const token = input[pos];
-
-        if (input_len - pos < MIN_MATCH_LENGTH) {
-            try output.append(allocator, token);
-            continue;
+        var hash: usize = 0;
+        for (tokens[0..MIN_MATCH_LENGTH]) |token| {
+            const literal = switch (token) {
+                .literal => |literal| literal,
+                .match => return error.InvalidTokenForHashing,
+            };
+            hash = (hash *% HASH_MULTIPLIER) +% @as(usize, literal);
         }
 
-        const match = try find_longest_match(pos, input);
-        if (match.length >= MIN_MATCH_LENGTH) {
-            try output.append(allocator, Token{ .match = match });
-            pos += @as(usize, match.length) - 1;
-        } else {
-            try output.append(allocator, token);
-        }
-
-        try insert_string(pos, input);
+        return hash % HASH_SIZE;
     }
 
-    return output.toOwnedSlice(allocator);
-}
+    /// Records `pos` in the chain for the tokens starting there.
+    fn insert(self: *HashChain, pos: usize, input: []const Token) !void {
+        const hash = try hashTokens(input[pos..]);
+
+        self.prev[pos & WINDOW_MASK] = self.head[hash];
+        self.head[hash] = pos;
+    }
+
+    /// Finds the longest match for the tokens starting at `pos`, or a match of
+    /// length 0 when none is found.
+    fn findLongestMatch(self: *HashChain, pos: usize, input: []const Token) !Match {
+        var best = Match{ .distance = 0, .length = 0 };
+
+        const hash = try hashTokens(input[pos..]);
+        var candidate = self.head[hash];
+        const max_length: u16 = @intCast(@min(@as(usize, MAX_MATCH_LENGTH), input.len - pos));
+
+        while (candidate != NO_POSITION) : (candidate = self.prev[candidate & WINDOW_MASK]) {
+            const distance = @as(u16, @intCast(pos - candidate));
+            if (distance > WINDOW_SIZE) continue;
+
+            var length: u16 = 0;
+            while (length < max_length and
+                std.meta.eql(input[pos + @as(usize, length)], input[candidate + @as(usize, length)]))
+            {
+                length += 1;
+            }
+
+            if (length > best.length) {
+                best = .{ .distance = distance, .length = length };
+            }
+        }
+
+        return best;
+    }
+};

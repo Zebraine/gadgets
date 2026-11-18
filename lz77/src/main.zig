@@ -1,7 +1,14 @@
+//! Demo driver: reads one line from stdin and prints every stage of an LZ77
+//! round trip — compressed tokens, packed bytes, decoded tokens, and the
+//! restored text.
+
 const std = @import("std");
 const Io = std.Io;
 
 const lz77 = @import("lz77");
+const HashChain = lz77.hashchain.HashChain;
+const Token = lz77.token_stream.Token;
+const TokenStream = lz77.token_stream.TokenStream;
 
 pub fn main(init: std.process.Init) !void {
     const allocator = std.heap.smp_allocator;
@@ -16,41 +23,37 @@ pub fn main(init: std.process.Init) !void {
     var writer = Io.File.stdout().writer(io, &write_buffer);
     const stdout = &writer.interface;
 
-    const tokens = try lz77.token_stream.tokenize(allocator, line);
-    const compressed = try lz77.hashchain.compress(allocator, tokens);
+    var stream = TokenStream.init(allocator);
+    var compressor = HashChain.init(allocator);
 
-    for (compressed) |token| {
-        switch (token) {
-            .literal => |literal| {
-                try stdout.print("Literal: {}\n", .{literal});
-            },
-            .match => |match| {
-                try stdout.print("Match: distance={}, length={}\n", .{ match.distance, match.length });
-            },
-        }
+    const tokens = try stream.tokenize(line);
+    const compressed = try compressor.compress(tokens);
+    try printTokens(stdout, compressed, "");
+
+    const encoded = try stream.encode(compressed, lz77.MIN_MATCH_LENGTH);
+    for (encoded) |byte| {
+        try stdout.print("{x}\n", .{byte});
     }
 
-    const encoded = try lz77.token_stream.encode(allocator, compressed, lz77.MIN_MATCH_LENGTH);
+    const decoded = try stream.decode(encoded, lz77.MIN_MATCH_LENGTH);
+    try printTokens(stdout, decoded, "Decoded ");
 
-    for (encoded) |c| {
-        try stdout.print("{x}\n", .{c});
-    }
-
-    const decoded = try lz77.token_stream.decode(allocator, encoded, lz77.MIN_MATCH_LENGTH);
-
-    for (decoded) |token| {
-        switch (token) {
-            .literal => |literal| {
-                try stdout.print("Decoded Literal: {}\n", .{literal});
-            },
-            .match => |match| {
-                try stdout.print("Decoded Match: distance={}, length={}\n", .{ match.distance, match.length });
-            },
-        }
-    }
-
-    const detokenized = try lz77.token_stream.detokenize(allocator, decoded);
+    const detokenized = try stream.detokenize(decoded);
     try stdout.print("Detokenized: {s}\n", .{detokenized});
 
     try stdout.flush();
+}
+
+/// Prints one line per token, with `prefix` naming the pipeline stage.
+fn printTokens(writer: *Io.Writer, tokens: []const Token, prefix: []const u8) !void {
+    for (tokens) |token| {
+        switch (token) {
+            .literal => |literal| {
+                try writer.print("{s}Literal: {}\n", .{ prefix, literal });
+            },
+            .match => |match| {
+                try writer.print("{s}Match: distance={}, length={}\n", .{ prefix, match.distance, match.length });
+            },
+        }
+    }
 }
